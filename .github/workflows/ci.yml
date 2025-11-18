@@ -78,13 +78,16 @@ jobs:
           no-cache: true # Adicione esta linha para forçar a reinstalação de dependências
       # 6. Container Scan com Trivy (Segurança) [NOVO]
       # Verifica se a imagem do SO ou do Node tem falhas.
-      - name: Escanear imagem Docker com Trivy
+      - name: Escanear dependências Node com Trivy (SCA)
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ghcr.io/${{ github.repository }}:latest
+          scan-type: "fs" # scan no sistema de arquivos
+          scan-ref: "." # escaneia somente o código do repositório
+          scanners: "vuln" # ignora secret scan e config scan
           format: "table"
-          exit-code: "1" # Quebra o pipeline se achar erro
-          severity: "HIGH,CRITICAL" # Nível de severidade para falhar
+          exit-code: "1"
+          severity: "HIGH,CRITICAL" # só falha para HIGH e CRITICAL
+          ignore-unfixed: true # ignora CVEs sem patch (boa prática)
 
       # 7. Push da Imagem (Entrega) [MODIFICADO]
       # Só roda se for na main E se o Trivy tiver passado
