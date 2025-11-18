@@ -1,0 +1,134 @@
+name: Pipeline DevSecOps - CI/CD Seguro
+
+# Gatilhos do Pipeline
+on:
+  push:
+    branches: ["main"] # Dispara CI + Segurança + CD (Deploy)
+  pull_request:
+    branches: ["main"] # Dispara CI + Segurança (Apenas Teste)
+
+jobs:
+  # ---------------------------------------------------
+  # JOB 1: CI, SEGURANÇA & ENTREGA
+  # ---------------------------------------------------
+  test-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # Para ler o código
+      packages: write # Para publicar no GHCR
+      security-events: write # (Opcional) Para relatórios de segurança
+
+    steps:
+      # 1. Preparação do Ambiente
+      - name: Checkout do Código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Instalar Dependências
+        run: npm install
+
+      # 2. Testes Unitários (Qualidade)
+      - name: Rodar Testes Unitários
+        run: npm test
+
+      # 3. SCA - Análise de Dependências (Segurança) [NOVO]
+      # Verifica se as bibliotecas (node_modules) têm falhas conhecidas.
+      # Falha o pipeline se encontrar erros de nível ALTO.
+      - name: Verificar vulnerabilidades de dependências (SCA)
+        run: npm audit --audit-level=high
+
+      # 4. Configuração do Docker
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Logar no GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extrair Metadados do Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha
+            latest
+
+      # 5. Build Local para Escaneamento [MODIFICADO]
+      # Constrói a imagem, mas NÃO envia ainda (load: true)
+      - name: Build da Imagem Docker (Preparação para Scan)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false # Importante: Não publicar ainda!
+          load: true # Carrega no Docker local do runner
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # SOLUÇÃO PARA O CACHE
+          no-cache: true # Adicione esta linha para forçar a reinstalação de dependências
+      # 6. Container Scan com Trivy (Segurança) [NOVO]
+      # Verifica se a imagem do SO ou do Node tem falhas.
+      - name: Escanear imagem Docker com Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:latest
+          format: "table"
+          exit-code: "1" # Quebra o pipeline se achar erro
+          severity: "HIGH,CRITICAL" # Nível de severidade para falhar
+
+      # 7. Push da Imagem (Entrega) [MODIFICADO]
+      # Só roda se for na main E se o Trivy tiver passado
+      - name: Push da Imagem Docker para o GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true # Agora sim, publica!
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # ---------------------------------------------------
+  # JOB 2: CD (DEPLOY LOCAL)
+  # ---------------------------------------------------
+  deploy-to-local:
+    # Só roda se for push na main
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    # Só roda se o Job 1 (com todos os testes de segurança) passar
+    needs: test-and-build
+
+    # Roda na sua máquina local
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout do Código
+        uses: actions/checkout@v4
+
+      - name: Logar no GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fazer Deploy com Docker Compose
+        run: |
+          echo "Iniciando deploy seguro..."
+          docker-compose pull
+          docker-compose up -d --no-build
+          docker image prune -f
+          echo "Deploy concluído com sucesso!"
